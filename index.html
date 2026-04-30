@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Doodle Jump TG</title>
+    <!-- Telegram Mini App SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --tg-theme-bg-color: #ffffff;
+            --tg-theme-text-color: #000000;
+            --tg-theme-button-color: #3390ec;
+            --tg-theme-button-text-color: #ffffff;
+        }
+        body {
+            margin: 0; padding: 0;
+            background-color: var(--tg-theme-bg-color);
+            color: var(--tg-theme-text-color);
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #game-container {
+            position: relative; width: 100vw; height: 100vh;
+            overflow: hidden;
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        .ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column;
+            justify-content: space-between; padding: 10px; box-sizing: border-box;
+        }
+        .header { display: flex; justify-content: space-between; font-weight: bold; font-size: 18px; z-index: 5; }
+        .hint { text-align: center; padding: 10px; opacity: 0.7; font-size: 13px; }
+
+        #start-screen, #game-over-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            background: rgba(0,0,0,0.85); z-index: 20; pointer-events: auto;
+            transition: opacity 0.3s;
+        }
+        #game-over-screen { display: none; }
+        
+        h1, h2 { margin: 0 0 10px; color: #fff; text-align: center; }
+        p { color: #ccc; margin-bottom: 20px; text-align: center; }
+        
+        .btn {
+            background: var(--tg-theme-button-color); color: var(--tg-theme-button-text-color);
+            border: none; padding: 14px 28px; font-size: 16px; font-weight: bold;
+            border-radius: 12px; cursor: pointer; margin: 5px;
+            box-shadow: 0 4px 0 rgba(0,0,0,0.3); transition: transform 0.1s;
+        }
+        .btn:active { transform: translateY(4px); box-shadow: none; }
+        
+        #gameover-img {
+            max-width: 70%; max-height: 35%; border-radius: 12px; margin-bottom: 15px;
+            box-shadow: 0 0 10px rgba(255,255,255,0.2); display: block;
+        }
+        .fallback-text { color: #ff6b6b; font-size: 40px; font-weight: bold; margin-bottom: 15px; display: none; }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div class="ui-layer">
+            <div class="header">
+                <div id="score">⭐ 0</div>
+                <div id="best-score">🏆 0</div>
+            </div>
+            <div class="hint">← → или тап по краям экрана</div>
+        </div>
+
+        <div id="start-screen">
+            <h1>🐸 Doodle Jump</h1>
+            <p>Прыгай выше, собирай звёзды!</p>
+            <button class="btn" id="start-btn">▶ НАЧАТЬ ИГРУ</button>
+        </div>
+
+        <div id="game-over-screen">
+            <!-- Картинка проигрыша -->
+            <img id="gameover-img" src="gameover.png" alt="Game Over">
+            <div class="fallback-text">GAME OVER</div>
+            <h2>Ты упал!</h2>
+            <div id="final-score" style="color:#fff; font-size: 20px; margin-bottom: 15px;">Счёт: 0</div>
+            <button class="btn" id="restart-btn">🔄 ЗАНОВО</button>
+        </div>
+    </div>
+
+    <!-- Аудио -->
+    <audio id="bg-music" src="music.mp3" loop preload="auto"></audio>
+
+    <script>
+        // --- TELEGRAM MINI APP INIT ---
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand(); // Разворачиваем на весь экран
+        tg.setHeaderColor('secondary_bg_color');
+        tg.setBackgroundColor('bg_color');
+
+        // --- GAME SETUP ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth * window.devicePixelRatio;
+        canvas.height = window.innerHeight * window.devicePixelRatio;
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+        const scoreEl = document.getElementById('score');
+        const bestEl = document.getElementById('best-score');
+        const startScreen = document.getElementById('start-screen');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const finalScoreEl = document.getElementById('final-score');
+        const music = document.getElementById('bg-music');
+        const gameoverImg = document.getElementById('gameover-img');
+        const fallbackText = document.querySelector('.fallback-text');
+
+        let score = 0, bestScore = parseInt(localStorage.getItem('dj_best') || '0');
+        bestEl.textContent = `🏆 ${bestScore}`;
+        let gameRunning = false;
+        let platforms = [];
+        let player = { x: 0, y: 0, w: 40, h: 40, vx: 0, vy: 0, speed: 6, jump: -13, gravity: 0.4 };
+        let keys = { l: false, r: false };
+
+        // --- ASSET FALLBACKS ---
+        gameoverImg.onerror = () => {
+            gameoverImg.style.display = 'none';
+            fallbackText.style.display = 'block';
+        };
+        music.onerror = () => console.warn('🔊 music.mp3 не найден. Игра продолжится без звука.');
+
+        // --- GAME LOGIC ---
+        function resetGame() {
+            score = 0; scoreEl.textContent = `⭐ 0`;
+            player.x = (window.innerWidth / 2) - 20;
+            player.y = window.innerHeight - 160;
+            player.vx = 0; player.vy = 0;
+            platforms = [{ x: window.innerWidth/2 - 40, y: window.innerHeight - 100, w: 80, h: 15 }];
+            for(let i=0; i<7; i++) generatePlat(window.innerHeight - 100 - i*110);
+            gameRunning = true;
+            startScreen.style.display = 'none';
+            gameOverScreen.style.display = 'none';
+            tg.MainButton.hide();
+        }
+
+        function generatePlat(y) {
+            const w = 60 + Math.random()*50;
+            platforms.push({ x: Math.random()*(window.innerWidth-w), y: y, w: w, h: 15 });
+        }
+
+        function update() {
+            if(!gameRunning) return;
+            player.vy += player.gravity;
+            player.y += player.vy;
+            player.x += player.vx;
+            if(keys.l) player.vx = -player.speed;
+            else if(keys.r) player.vx = player.speed;
+            else player.vx *= 0.85;
+
+            if(player.x + player.w < 0) player.x = window.innerWidth;
+            if(player.x > window.innerWidth) player.x = -player.w;
+
+            if(player.y < window.innerHeight/2 && player.vy < 0) {
+                let offset = -player.vy;
+                player.y += offset;
+                platforms.forEach(p => p.y += offset);
+                score += Math.floor(offset);
+                scoreEl.textContent = `⭐ ${score}`;
+                platforms = platforms.filter(p => p.y < window.innerHeight);
+                if(platforms.length < 7) {
+                    const last = platforms[platforms.length-1];
+                    if(last) generatePlat(last.y - 110 - Math.random()*30);
+                }
+            }
+
+            if(player.vy > 0) {
+                platforms.forEach(p => {
+                    if(player.x + player.w > p.x && player.x < p.x + p.w &&
+                       player.y + player.h > p.y && player.y + player.h < p.y + p.h + player.vy) {
+                        player.vy = player.jump;
+                    }
+                });
+            }
+
+            if(player.y > window.innerHeight) gameOver();
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+            ctx.fillStyle = '#4caf50';
+            platforms.forEach(p => {
+                ctx.beginPath(); ctx.roundRect(p.x, p.y, p.w, p.h, 8); ctx.fill();
+                ctx.fillStyle = '#388e3c'; ctx.fillRect(p.x+4, p.y+4, p.w-8, 4); ctx.fillStyle = '#4caf50';
+            });
+
+            // Игрок
+            ctx.fillStyle = '#ffeb3b';
+            ctx.beginPath(); ctx.roundRect(player.x, player.y, player.w, player.h, 10); ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath(); ctx.arc(player.x+10, player.y+14, 6, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(player.x+30, player.y+14, 6, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#000';
+            ctx.beginPath(); ctx.arc(player.x+11, player.y+14, 2.5, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(player.x+31, player.y+14, 2.5, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#ff9800';
+            ctx.beginPath(); ctx.moveTo(player.x+15, player.y+22); ctx.lineTo(player.x+25, player.y+22); ctx.lineTo(player.x+20, player.y+28); ctx.fill();
+        }
+
+        function loop() { update(); draw(); if(gameRunning) requestAnimationFrame(loop); }
+
+        function gameOver() {
+            gameRunning = false;
+            music.pause(); music.currentTime = 0;
+            if(score > bestScore) { bestScore = score; localStorage.setItem('dj_best', bestScore); bestEl.textContent = `🏆 ${bestScore}`; }
+            finalScoreEl.textContent = `Счёт: ${score}`;
+            gameOverScreen.style.display = 'flex';
+            tg.MainButton.setText("🔄 ИГРАТЬ СНОВО");
+            tg.MainButton.show();
+            tg.MainButton.onClick(() => resetGame());
+        }
+
+        // --- CONTROLS ---
+        window.addEventListener('keydown', e => {
+            if(e.code === 'ArrowLeft') keys.l = true;
+            if(e.code === 'ArrowRight') keys.r = true;
+        });
+        window.addEventListener('keyup', e => {
+            if(e.code === 'ArrowLeft') keys.l = false;
+            if(e.code === 'ArrowRight') keys.r = false;
+        });
+        window.addEventListener('touchstart', e => {
+            const x = e.touches[0].clientX;
+            if(x < window.innerWidth/2) { keys.l = true; keys.r = false; }
+            else { keys.r = true; keys.l = false; }
+        }, {passive: true});
+        window.addEventListener('touchend', () => { keys.l = false; keys.r = false; });
+
+        document.getElementById('start-btn').addEventListener('click', () => {
+            resetGame();
+            music.volume = 0.5;
+            music.play().catch(() => {});
+            requestAnimationFrame(loop);
+        });
+        document.getElementById('restart-btn').addEventListener('click', resetGame);
+
+        // Обработка изменения размера окна (поворот экрана, TMA)
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth * window.devicePixelRatio;
+            canvas.height = window.innerHeight * window.devicePixelRatio;
+            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        });
+    </script>
+</body>
+</html>
